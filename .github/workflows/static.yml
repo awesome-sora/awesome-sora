@@ -70,6 +70,24 @@ jobs:
               out.puts("site_origin=#{site_origin}")
             end
           '
+      - name: Generate public build identity before the container
+        env:
+          PAGES_BUILD_BASE_PATH: ${{ steps.site_path.outputs.base_path }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          identity = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "basePath": os.environ["PAGES_BUILD_BASE_PATH"],
+          }
+          with Path("build-info.json").open("x", encoding="utf-8") as output:
+              os.fchmod(output.fileno(), 0o644)
+              output.write(json.dumps(identity) + "\n")
+          PYCODE
       - name: Build the Jekyll site
         uses: actions/jekyll-build-pages@v1
         with:
@@ -133,7 +151,11 @@ jobs:
               "runId": os.environ["GITHUB_RUN_ID"],
               "basePath": os.environ["PAGES_BUILD_BASE_PATH"],
           }
-          (site / "build-info.json").write_text(json.dumps(identity) + "\n")
+          marker = site / "build-info.json"
+          if marker.is_symlink() or not marker.is_file():
+              raise SystemExit("The built site is missing its identity asset")
+          if json.loads(marker.read_text(encoding="utf-8")) != identity:
+              raise SystemExit("Built site identity differs from this workflow run")
           print("Verified local HTML references:", checked)
           PYCODE
       - name: Upload the built site
