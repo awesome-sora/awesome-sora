@@ -1,50 +1,76 @@
-# Simple workflow for deploying static content to GitHub Pages
+# Build the existing repository site and deploy only main to GitHub Pages.
 name: Deploy static content to Pages
 
 on:
-  # Runs on pushes targeting the default branch
   push:
     branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+  pull_request:
+    branches: ["main"]
+    paths:
+      - '.github/workflows/static.yml'
+      - '**.md'
+      - '_config.yml'
+      - 'Gemfile*'
+      - 'assets/**'
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# Preserve the existing Pages deployment permissions.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
-  group: "pages"
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || 'pages' }}
   cancel-in-progress: false
 
 jobs:
-  # Single deploy job since we're just deploying
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the Jekyll site
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+      - name: Verify the entry page and record build identity
+        run: |
+          test -s _site/index.html
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          identity = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+          }
+          Path("_site/build-info.json").write_text(json.dumps(identity) + "\n")
+          PY
+      - name: Upload the built site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages
+          path: ./_site
+
   deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Build the Jekyll site
-        uses: jekyll/actions-jekyll@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Pages
         uses: actions/configure-pages@v5
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          # Upload entire repository
-          path: '.'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_site  # Jekyll 的默认构建输出目录
