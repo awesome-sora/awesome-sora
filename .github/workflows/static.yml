@@ -30,30 +30,112 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Read the actual Pages configuration on main
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Configure the exact build base path
+        id: site_path
+        env:
+          PAGES_EVENT_NAME: ${{ github.event_name }}
+          PAGES_SETUP_OUTCOME: ${{ steps.pages.outcome }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          PAGES_SITE_ORIGIN: ${{ steps.pages.outputs.origin }}
+        run: |
+          ruby -rjson -ryaml -rdate -ruri -e '
+            if ENV.fetch("PAGES_EVENT_NAME") == "pull_request"
+              base_path = "/awesome-sora"
+              site_origin = "https://awesome-sora.github.io"
+            else
+              abort "Pages configuration was not read successfully" unless ENV.fetch("PAGES_SETUP_OUTCOME") == "success"
+              base_path = ENV.fetch("PAGES_BASE_PATH")
+              site_origin = ENV.fetch("PAGES_SITE_ORIGIN")
+            end
+            origin = URI(site_origin)
+            abort "Invalid Pages origin" unless origin.is_a?(URI::HTTP) && origin.host && origin.userinfo.nil? && origin.query.nil? && origin.fragment.nil? && ["", "/"].include?(origin.path)
+            abort "Invalid Pages base path" unless base_path.match?(%r{\A(?:/[A-Za-z0-9._-]+)*/?\z}) && !base_path.split("/").any? { |part| [".", ".."].include?(part) }
+            config = File.file?("_config.yml") ? YAML.safe_load(File.read("_config.yml"), permitted_classes: [Date, Time], aliases: true) : {}
+            config = {} if config.nil?
+            abort "Expected a Jekyll configuration mapping" unless config.is_a?(Hash)
+            config["baseurl"] = base_path
+            File.write("_config.yml", YAML.dump(config))
+            File.open(ENV.fetch("GITHUB_OUTPUT"), "a") do |out|
+              out.puts("base_path=#{base_path}")
+              out.puts("site_origin=#{site_origin}")
+            end
+          '
       - name: Build the Jekyll site
         uses: actions/jekyll-build-pages@v1
         with:
           source: ./
           destination: ./_site
-      - name: Verify the entry page and record build identity
+      - name: Verify local paths and record build identity
+        env:
+          PAGES_BUILD_BASE_PATH: ${{ steps.site_path.outputs.base_path }}
+          PAGES_BUILD_SITE_ORIGIN: ${{ steps.site_path.outputs.site_origin }}
         run: |
           test -s _site/index.html
-          python3 - <<'PY'
+          python3 - <<'PYCODE'
           import json, os
+          from html.parser import HTMLParser
           from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          if Path("_site").is_symlink():
+              raise SystemExit("The site directory cannot be a symlink")
+          site = Path("_site").resolve()
+          prefix = os.environ["PAGES_BUILD_BASE_PATH"].rstrip("/")
+          origin = urlsplit(os.environ["PAGES_BUILD_SITE_ORIGIN"])
+          class LocalReferences(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.urls = []
+              def handle_starttag(self, tag, attrs):
+                  self.urls.extend(value for name, value in attrs if name in ("src", "href") and value)
+          checked = 0
+          for html in site.rglob("*.html"):
+              if not html.resolve().is_relative_to(site):
+                  raise SystemExit("HTML file leaves the site directory")
+              parser = LocalReferences()
+              parser.feed(html.read_text(encoding="utf-8"))
+              for value in parser.urls:
+                  url = urlsplit(value)
+                  if url.scheme == "file":
+                      raise SystemExit("File URLs are not published site resources")
+                  if not url.path:
+                      continue
+                  if (url.scheme or url.netloc) and (url.scheme not in ("", "http", "https") or url.netloc.lower() != origin.netloc.lower()):
+                      continue
+                  path = unquote(url.path)
+                  if path.startswith("/"):
+                      if prefix and path != prefix and not path.startswith(prefix + "/"):
+                          raise SystemExit("Local resource omits the Pages project prefix: " + str(html.relative_to(site)))
+                      target = site / path[len(prefix):].lstrip("/")
+                  else:
+                      target = html.parent / path
+                  target = target.resolve()
+                  if not target.is_relative_to(site):
+                      raise SystemExit("Local resource leaves the site directory")
+                  if target.is_dir():
+                      target = target / "index.html"
+                  if not target.is_file():
+                      raise SystemExit("Missing local resource in " + str(html.relative_to(site)))
+                  checked += 1
           identity = {
               "repository": os.environ["GITHUB_REPOSITORY"],
               "sourceCommit": os.environ["GITHUB_SHA"],
               "event": os.environ["GITHUB_EVENT_NAME"],
               "runId": os.environ["GITHUB_RUN_ID"],
+              "basePath": os.environ["PAGES_BUILD_BASE_PATH"],
           }
-          Path("_site/build-info.json").write_text(json.dumps(identity) + "\n")
-          PY
+          (site / "build-info.json").write_text(json.dumps(identity) + "\n")
+          print("Verified local HTML references:", checked)
+          PYCODE
       - name: Upload the built site
         uses: actions/upload-pages-artifact@v3
         with:
@@ -69,8 +151,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
