@@ -25,7 +25,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout trusted event main commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false

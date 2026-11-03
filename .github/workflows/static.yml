@@ -33,13 +33,13 @@ jobs:
       pages: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Read the actual Pages configuration on main
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Configure the exact build base path
         id: site_path
         env:
@@ -159,7 +159,7 @@ jobs:
           print("Verified local HTML references:", checked)
           PYCODE
       - name: Upload the built site
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           name: github-pages
           path: ./_site
@@ -175,4 +175,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
